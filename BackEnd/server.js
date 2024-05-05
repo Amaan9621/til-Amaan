@@ -381,6 +381,14 @@ app.post('/api/meals', async (req, res) => {
 });
 
 
+
+
+
+
+
+
+
+
 // Finde et måltid og se dens ingredienser og vægt
 // ENDPOINT VIRKER
 // Test i Insomnia ved at skrive: http://localhost:PORT/api/meals/1 - husk at ændre PORT
@@ -425,109 +433,148 @@ app.get('/api/meals/:id', async (req, res) => {
 
 // **MEAL TRACKER**
 
-// Henter måltider
-app.get('/api/meal-tracker/meals/:userId', async (req, res) => {
-  const { userId } = req.params;
+// Endpoint for at hente alle måltider
+app.get('/api/meals', async (req, res) => {
   try {
-    const results = await db.query('SELECT * FROM meals WHERE userId = ?', [userId]);
-    res.json(results);
+    // Opret forbindelse til databasen
+    const pool = await sql.connect(dbConfig);
+
+    // Udfør SQL-forespørgsel for at hente alle måltider
+    const mealsQuery = 'SELECT mealId, mealName, userId, kcal, protein, fat, fiber FROM meals';
+    const result = await pool.request().query(mealsQuery);
+
+    // Send resultatet som JSON
+    res.json(result.recordset);
   } catch (error) {
-    res.status(500).json({ message: 'Error fetching meals', error: error.message });
+    console.error('Fejl ved hentning af måltider:', error);
+    res.status(500).json({ message: 'Server fejl ved hentning af måltider', error: error.message });
   }
 });
 
 
+// Endpoint for at hente den samlede vægt af en måltid
+app.get('/api/meals/weight/:mealId', async (req, res) => {
+  const { mealId } = req.params;
+  try {
+    const pool = await sql.connect(dbConfig);
 
-// Registrer et måltid
+    // Hent ingredienserne til måltidet
+    const query = `
+      SELECT SUM(ingredient.weight) AS totalWeight
+      FROM OPENJSON(
+        (SELECT ingredients FROM meals WHERE mealId = @mealId)
+      ) 
+      WITH (
+        ingredientId INT '$.ingredientId',
+        weight DECIMAL(10,2) '$.weight'
+      ) ingredient
+    `;
+    const result = await pool.request()
+      .input('mealId', sql.Int, mealId)
+      .query(query);
+
+    const totalWeight = result.recordset[0]?.totalWeight || 0;
+    res.json({ mealId, totalWeight });
+  } catch (error) {
+    console.error('Fejl ved hentning af måltidets vægt:', error);
+    res.status(500).json({ message: 'Server fejl', error: error.message });
+  }
+});
+
+
+// Endpoint til at registrere et måltid i tracker-tabellen
 app.post('/api/meal-tracker/track-meal', async (req, res) => {
-  const { mealId, userId, intakeDate, weight, location = 'Unknown' } = req.body;
+  const { mealId, weight, userId, consumptionDate, location } = req.body;
+
   try {
+    const pool = await sql.connect(dbConfig);
     const query = `
-      INSERT INTO intakes (mealId, userId, intakeDate, weight, location) 
-      VALUES (?, ?, ?, ?, ?)
+      INSERT INTO dbo.tracker (mealId, weight, userId, consumptionDate, location)
+      VALUES (@mealId, @weight, @userId, @consumptionDate, @location)
     `;
-    const result = await db.query(query, [mealId, userId, intakeDate, weight, location]);
-    res.status(201).json({
-      id: result.insertId,
-      mealId,
-      userId,
-      intakeDate,
-      weight,
-      location
-    });
+    await pool.request()
+      .input('mealId', sql.Int, mealId)
+      .input('weight', sql.Decimal(10, 2), weight)
+      .input('userId', sql.Int, userId)
+      .input('consumptionDate', sql.DateTime, new Date(consumptionDate))
+      .input('location', sql.VarChar(255), location)
+      .query(query);
+
+    res.status(201).json({ message: 'Måltid registreret i tracker-tabellen' });
   } catch (error) {
-    res.status(500).json({ message: 'Error registering meal intake', error: error.message });
+    console.error('Fejl ved registrering af måltid:', error);
+    res.status(500).json({ message: 'Serverfejl', error: error.message });
   }
 });
 
-// Registrer en enkelt ingrediens
-app.post('/api/meal-tracker/track-ingredient', async (req, res) => {
-  const { foodItemId, userId, weight, location = 'Unknown' } = req.body;
-  const intakeDate = new Date();
-  
-  try {
-    const query = `
-      INSERT INTO intakes (foodItemId, userId, intakeDate, weight, location) 
-      VALUES (?, ?, ?, ?, ?)
-    `;
-    const result = await db.query(query, [foodItemId, userId, intakeDate, weight, location]);
-    res.status(201).json({
-      id: result.insertId,
-      foodItemId,
-      userId,
-      intakeDate: intakeDate.toISOString(),
-      weight,
-      location
-    });
-  } catch (error) {
-    res.status(500).json({ message: 'Error registering ingredient intake', error: error.message });
-  }
-});
 
-// Hent brugerens næringsindtag
-app.get('/api/meal-tracker/intake/:userId', async (req, res) => {
+// Endpoint til at hente alle registrerede måltider fra tracker-tabellen for en given bruger
+app.get('/api/meal-tracker/intakes/:userId', async (req, res) => {
   const { userId } = req.params;
-  const query = 'SELECT * FROM intakes WHERE userId = ?';
   try {
-    const results = await db.query(query, [userId]);
-    res.json(results);
+    const pool = await sql.connect(dbConfig);
+    const query = `
+      SELECT t.trackerId, t.mealId, t.weight, t.consumptionDate, t.location, m.mealName
+      FROM dbo.tracker t
+      JOIN dbo.meals m ON t.mealId = m.mealId
+      WHERE t.userId = @userId
+      ORDER BY t.consumptionDate DESC
+    `;
+    const result = await pool.request()
+      .input('userId', sql.Int, userId)
+      .query(query);
+
+    res.json(result.recordset);
   } catch (error) {
-    res.status(500).json({ message: 'Error fetching nutrient intake', error: error.message });
+    console.error('Fejl ved hentning af måltider:', error);
+    res.status(500).json({ message: 'Serverfejl', error: error.message });
   }
 });
 
-// Rediger en registrering
-app.put('/api/meal-tracker/intake/:intakeId', async (req, res) => {
-  const { intakeId } = req.params;
-  const { mealId, foodItemId, intakeDate, servings, weight } = req.body;
-  const query = 'UPDATE intakes SET mealId = ?, foodItemId = ?, intakeDate = ?, servings = ?, weight = ? WHERE id = ?';
-  try {
-    const result = await db.query(query, [mealId, foodItemId, intakeDate, servings, weight, intakeId]);
-    if (result.affectedRows) {
-      res.json({ message: 'Nutrient intake updated', id: intakeId });
-    } else {
-      res.status(404).json({ message: 'Nutrient intake not found' });
-    }
-  } catch (error) {
-    res.status(500).json({ message: 'Error updating nutrient intake', error: error.message });
-  }
-});
-
-// Slet en registrering
 app.delete('/api/meal-tracker/intake/:intakeId', async (req, res) => {
   const { intakeId } = req.params;
-  const query = 'DELETE FROM intakes WHERE id = ?';
   try {
-    const result = await db.query(query, [intakeId]);
-    if (result.affectedRows) {
-      res.json({ message: 'Nutrient intake deleted' });
+    const pool = await sql.connect(dbConfig);
+    const query = 'DELETE FROM tracker WHERE trackerId = @trackerId';
+    const result = await pool.request()
+      .input('trackerId', sql.Int, intakeId)
+      .query(query);
+
+    if (result.rowsAffected[0] > 0) {
+      res.json({ message: 'Måltid slettet' });
     } else {
-      res.status(404).json({ message: 'Nutrient intake not found' });
+      res.status(404).json({ message: 'Måltid ikke fundet' });
     }
   } catch (error) {
-    res.status(500).json({ message: 'Error deleting nutrient intake', error: error.message });
+    console.error('Fejl ved sletning af måltid:', error);
+    res.status(500).json({ message: 'Serverfejl', error: error.message });
   }
 });
+
+app.put('/api/meal-tracker/intake/:intakeId', async (req, res) => {
+  const { intakeId } = req.params;
+  const { consumptionDate } = req.body;
+
+  try {
+    const pool = await sql.connect(dbConfig);
+    const query = 'UPDATE tracker SET consumptionDate = @consumptionDate WHERE trackerId = @trackerId';
+    const result = await pool.request()
+      .input('consumptionDate', sql.DateTime, consumptionDate)
+      .input('trackerId', sql.Int, intakeId)
+      .query(query);
+
+    if (result.rowsAffected[0] > 0) {
+      res.json({ message: 'Måltid opdateret' });
+    } else {
+      res.status(404).json({ message: 'Måltid ikke fundet' });
+    }
+  } catch (error) {
+    console.error('Fejl ved opdatering af måltid:', error);
+    res.status(500).json({ message: 'Serverfejl', error: error.message });
+  }
+});
+
+
 
 
 
